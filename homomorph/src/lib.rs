@@ -14,6 +14,7 @@
 //! tools like Claude Code's Edit tool.
 
 #![forbid(unsafe_code)]
+#![deny(clippy::string_slice)]
 
 pub mod edit_tool;
 pub mod forward;

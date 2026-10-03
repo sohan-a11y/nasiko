@@ -303,6 +303,24 @@ async fn chat_core(
         None
     };
 
+    // ── homomorph seam (Phase 4 / C1) ──────────────────────────────────────────────────
+    // Egress: after compression and brevity, before dispatching to provider.
+    // Reversibly pseudonymizes code identifiers if enabled and not killed.
+    let homomorph_enabled = ctx.cfg.homomorph_enabled && !ctx.cfg.homomorph_kill_switch;
+    let mut homomorph_ctx =
+        crate::homomorph::HomomorphContext::for_owner(homomorph_enabled, &owner_id);
+    if homomorph_ctx.enabled {
+        if let (Some(flow), Ok(owner)) = (flow_id.as_deref(), owner_id.parse::<uuid::Uuid>())
+            && let Some(existing_table) =
+                crate::homomorph::retrieve_vault(&ctx.db, flow, owner).await
+        {
+            homomorph_ctx.table = existing_table;
+        }
+        if let Err(blocked) = crate::homomorph::apply_forward(&mut req, &mut homomorph_ctx) {
+            return Err(GatewayError::Forbidden(blocked.to_string()));
+        }
+    }
+
     // ── savings ledger inputs ─────────────────────────────────────────────────────────────
     // Measured here, after both seams, because this is the payload the provider will actually
     // bill for — which is what makes `sent_bytes / reported_input_tokens` a calibration rather
@@ -383,6 +401,7 @@ async fn chat_core(
             request_bytes: Some(sent_bytes),
             span: llm_span.clone(),
             compact_tools_ctx,
+            homomorph_ctx,
         });
     }
 
@@ -395,6 +414,26 @@ async fn chat_core(
         crate::compact_tools::apply_ingress(&mut resp, cctx)?;
     }
     let latency_ms = started.elapsed().as_millis() as i64;
+
+    // Homomorph reverse transform on incoming response before rendering (C1)
+    if homomorph_ctx.enabled {
+        crate::homomorph::apply_reverse_response(&mut resp, &homomorph_ctx).map_err(|e| {
+            GatewayError::Internal(format!("homomorph reverse transform failed: {e}"))
+        })?;
+
+        if !homomorph_ctx.table.is_empty()
+            && let (Some(flow), Ok(owner)) = (flow_id.as_deref(), owner_id.parse::<uuid::Uuid>())
+        {
+            crate::homomorph::persist_vault(
+                &ctx.db,
+                flow,
+                owner,
+                agent_id.parse().ok(),
+                &homomorph_ctx.table,
+            )
+            .await;
+        }
+    }
 
     // Record effective model and token usage on the server-side gen_ai span.
     llm_span.record("gen_ai.response.model", model.as_str());
@@ -597,6 +636,7 @@ struct StreamChatArgs<'a> {
     compress_bytes: Option<(usize, usize)>,
     request_bytes: Option<usize>,
     compact_tools_ctx: Option<crate::compact_tools::CompactToolsContext>,
+    homomorph_ctx: crate::homomorph::HomomorphContext,
 }
 
 /// Stream provider chunks back as OpenAI SSE: `data: <chunk>\n\n` … `data: [DONE]\n\n`.
@@ -622,19 +662,20 @@ fn stream_chat(args: StreamChatArgs<'_>) -> Result<Response, GatewayError> {
         compress_bytes,
         request_bytes,
         compact_tools_ctx,
+        homomorph_ctx,
     } = args;
     let state = Arc::new(Mutex::new(StreamState::default()));
     let guard = UsageGuard {
         db: ctx.db.clone(),
         pricing: ctx.pricing.clone(),
         span,
-        owner_id,
-        agent_id,
+        owner_id: owner_id.clone(),
+        agent_id: agent_id.clone(),
         provider,
         model: model.clone(),
         started,
         state: state.clone(),
-        flow_id,
+        flow_id: flow_id.clone(),
         attribution_source,
         platform_paid,
         compress_metadata,
@@ -650,6 +691,7 @@ fn stream_chat(args: StreamChatArgs<'_>) -> Result<Response, GatewayError> {
         // `event:` sequences for Anthropic) and its terminal events.
         let _guard = guard;
         let mut renderer = renderer;
+        let mut homomorph_decoder = crate::homomorph::HomomorphStreamDecoder::new(&homomorph_ctx);
         futures::pin_mut!(provider_stream);
         let mut compact_decoder = compact_tools_ctx.map(|c| nasiko_tool_compact::StreamDecoder::new(c.original_tools));
         let mut call_counter = 0usize;
@@ -658,6 +700,18 @@ fn stream_chat(args: StreamChatArgs<'_>) -> Result<Response, GatewayError> {
             match item {
                 Ok(mut chunk) => {
                     chunk.model = model.clone();
+                    if homomorph_ctx.enabled && !homomorph_ctx.table.is_empty() {
+                        for choice in &mut chunk.choices {
+                            if let Some(ref mut content) = choice.delta.content {
+                                match homomorph_decoder.push(content) {
+                                    Ok(reversed) => *content = reversed,
+                                    Err(e) => {
+                                        tracing::warn!(target: "nasiko::llm_router::homomorph", error = %e, "streaming reverse failed");
+                                    }
+                                }
+                            }
+                        }
+                    }
                     {
                         let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
                         if chunk.usage.is_some() {
@@ -768,6 +822,44 @@ fn stream_chat(args: StreamChatArgs<'_>) -> Result<Response, GatewayError> {
                 }
             }
         }
+        if homomorph_ctx.enabled && !homomorph_ctx.table.is_empty() {
+            if let Ok(tail) = homomorph_decoder.finish()
+                && !tail.is_empty()
+            {
+                let tail_chunk = ChatChunk {
+                    id: format!("tail_{}", uuid::Uuid::new_v4()),
+                    object: "chat.completion.chunk".into(),
+                    created: Some(chrono::Utc::now().timestamp()),
+                    model: model.clone(),
+                    choices: vec![crate::ir::chat::ChunkChoice {
+                        index: 0,
+                        delta: crate::ir::chat::Delta {
+                            role: None,
+                            content: Some(tail),
+                            tool_calls: None,
+                        },
+                        finish_reason: None,
+                    }],
+                    usage: None,
+                    extra: Default::default(),
+                };
+                for frame in renderer.render(tail_chunk) {
+                    yield Ok::<String, std::io::Error>(frame);
+                }
+            }
+
+            if let (Some(flow), Ok(owner)) = (flow_id.as_deref(), owner_id.parse::<uuid::Uuid>()) {
+                crate::homomorph::persist_vault(
+                    &_guard.db,
+                    flow,
+                    owner,
+                    agent_id.parse().ok(),
+                    &homomorph_ctx.table,
+                )
+                .await;
+            }
+        }
+
         {
             let mut st = state.lock().unwrap_or_else(|e| e.into_inner());
             if call_counter > 0 {
@@ -1703,5 +1795,86 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, GatewayError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn homomorph_enabled_end_to_end() {
+        let mut server = mockito::Server::new_async().await;
+        let seen = Arc::new(Mutex::new(String::new()));
+        let seen_capture = seen.clone();
+
+        let mock = server
+            .mock("POST", "/chat/completions")
+            .with_header("content-type", "application/json")
+            .with_body_from_request(move |req| {
+                let body = req.body().expect("body present");
+                let body_str = String::from_utf8_lossy(body).into_owned();
+                *seen_capture.lock().unwrap() = body_str;
+
+                json!({
+                    "id": "chatcmpl-homomorph", "object": "chat.completion", "model": "gpt-4o",
+                    "choices": [{
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": "ok"
+                        },
+                        "finish_reason": "stop"
+                    }],
+                    "usage": { "prompt_tokens": 10, "completion_tokens": 8, "total_tokens": 18 }
+                })
+                .to_string()
+                .into_bytes()
+            })
+            .create_async()
+            .await;
+
+        let mut ctx = ctx_with(server.url());
+        let mut cfg = (*ctx.cfg).clone();
+        cfg.homomorph_enabled = true;
+        ctx.cfg = Arc::new(cfg);
+
+        let store = Store {
+            config: None,
+            is_coding_agent: true,
+            compress_enabled: false,
+        };
+
+        let request_body = json!({
+            "model": "gpt-4o",
+            "messages": [{
+                "role": "user",
+                "content": "pub fn secret_payroll_calculator() -> f64 { 5000.0 }"
+            }]
+        });
+
+        let resp = chat_core(
+            &ctx,
+            &store,
+            &auth_headers(&token()),
+            request_body,
+            InboundFormat::OpenAi,
+            None,
+        )
+        .await
+        .expect("chat_core succeeded");
+
+        mock.assert_async().await;
+
+        // 1. Verify egress was pseudonymized: provider NEVER saw secret_payroll_calculator
+        let provider_received = seen.lock().unwrap().clone();
+        assert!(
+            !provider_received.contains("secret_payroll_calculator"),
+            "provider must never receive original secret symbol: {}",
+            provider_received
+        );
+        assert!(
+            provider_received.contains("fn_"),
+            "provider must receive pseudonymized surrogate: {}",
+            provider_received
+        );
+
+        // 2. Verify response status
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
     }
 }

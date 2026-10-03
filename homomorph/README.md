@@ -29,10 +29,9 @@ Reversible, policy-driven identifier pseudonymization and privacy filtering for 
 
 | Project / Paper | Reference | Date | Stars / Venue | Key Difference vs Homomorph |
 |---|---|---|---|---|
-| **SchrodingerRepo** | Kuo et al., [arXiv:2407.03310](https://arxiv.org/abs/2407.03310) | Jul 2024 | arXiv | Academic benchmark for repository obfuscation; Homomorph is an online, streaming, router-integrated proxy with fail-closed Claude Edit tool support. |
-| **PromptCape** | Zhang et al., [arXiv:2404.09506](https://arxiv.org/abs/2404.09506) | Apr 2024 | arXiv | Focuses on generalized prompt anonymization; Homomorph is specifically AST/language-aware for multi-lingual codebases and streaming SSE. |
+| **SchrodingerRepo** | Chen et al., [arXiv:2609.27891](https://arxiv.org/abs/2609.27891) | Aug 2026 | arXiv | Academic benchmark for repository identifier obfuscation; Homomorph is an online, streaming, router-integrated proxy with fail-closed Claude Edit tool support. |
 | **Stacklok CodeGate** | [GitHub](https://github.com/stacklok/codegate) | 2024 | ~1.5k★ | Local privacy gateway; Homomorph adds bidirectional streaming holdback buffering and cryptographic AES-GCM vault persistence. |
-| **Microsoft Presidio** / **LiteLLM** | [GitHub](https://github.com/microsoft/presidio) | 2023-2024 | ~4.5k★ | Heavy PII/NLP entity extraction; Homomorph is zero-dependency, ultra-low latency (<50 µs) AST identifier pseudonymization. |
+| **Microsoft Presidio** / **LiteLLM** | [GitHub](https://github.com/microsoft/presidio) | 2023-2024 | ~4.5k★ | Heavy PII/NLP entity extraction; Homomorph is zero-dependency, ultra-low latency (<50 µs) structural lexical identifier pseudonymization. |
 
 ---
 

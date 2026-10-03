@@ -112,7 +112,7 @@ impl HomomorphPolicy {
                 return true;
             }
             if pattern.ends_with('*') {
-                let prefix = &pattern[..pattern.len() - 1];
+                let prefix = pattern.strip_suffix('*').unwrap_or(pattern);
                 if name.starts_with(prefix) {
                     return true;
                 }

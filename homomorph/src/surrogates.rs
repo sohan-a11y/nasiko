@@ -109,7 +109,7 @@ pub fn generate_surrogate(original: &str, kind: SymbolKind, salt: &[u8], counter
     }
     let result = mac.finalize().into_bytes();
     let hash_hex = hex::encode(result);
-    let short_hash = &hash_hex[..6];
+    let short_hash = hash_hex.get(..12).unwrap_or(&hash_hex);
 
     let style = detect_casing_style(original);
 

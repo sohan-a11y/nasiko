@@ -76,7 +76,12 @@ pub fn forward_transform(
         .collect();
     symbols_to_replace.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
 
-    let mut transformed = intermediate;
+    let (mut transformed, literals) = if policy.string_literals == TransformAction::Preserve {
+        mask_string_literals(&intermediate)
+    } else {
+        (intermediate, Vec::new())
+    };
+
     let mut total_replacements = 0usize;
 
     for (original, surrogate) in symbols_to_replace {
@@ -90,12 +95,96 @@ pub fn forward_transform(
         }
     }
 
+    if policy.string_literals == TransformAction::Preserve {
+        transformed = unmask_string_literals(transformed, &literals);
+    }
+
     ForwardResult {
         text: transformed,
         replacements: total_replacements,
         secrets,
         blocked: false,
     }
+}
+
+fn mask_string_literals(text: &str) -> (String, Vec<String>) {
+    let mut out = String::with_capacity(text.len());
+    let mut literals = Vec::new();
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let mut i = 0;
+
+    while i < chars.len() {
+        let (byte_idx, ch) = chars[i];
+        if ch == '"' || ch == '\'' || ch == '`' {
+            let quote = ch;
+            let is_triple = if quote != '`' && i + 2 < chars.len() {
+                chars[i + 1].1 == quote && chars[i + 2].1 == quote
+            } else {
+                false
+            };
+
+            let start_byte = byte_idx;
+            let mut end_byte = text.len();
+
+            if is_triple {
+                i += 3;
+                while i < chars.len() {
+                    let (_, c) = chars[i];
+                    if c == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if c == quote
+                        && i + 2 < chars.len()
+                        && chars[i + 1].1 == quote
+                        && chars[i + 2].1 == quote
+                    {
+                        end_byte = chars[i + 2].0 + quote.len_utf8();
+                        i += 3;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else {
+                i += 1;
+                while i < chars.len() {
+                    let (b_idx, c) = chars[i];
+                    if c == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if c == quote {
+                        end_byte = b_idx + quote.len_utf8();
+                        i += 1;
+                        break;
+                    }
+                    if c == '\n' && quote != '`' {
+                        end_byte = b_idx;
+                        break;
+                    }
+                    i += 1;
+                }
+            }
+
+            let lit = text.get(start_byte..end_byte).unwrap_or("");
+            let placeholder = format!("__HOMOMORPH_STR_LIT_{}__", literals.len());
+            literals.push(lit.to_string());
+            out.push_str(&placeholder);
+        } else {
+            out.push(ch);
+            i += 1;
+        }
+    }
+
+    (out, literals)
+}
+
+fn unmask_string_literals(mut text: String, literals: &[String]) -> String {
+    for (idx, lit) in literals.iter().enumerate() {
+        let placeholder = format!("__HOMOMORPH_STR_LIT_{idx}__");
+        text = text.replace(&placeholder, lit);
+    }
+    text
 }
 
 #[cfg(test)]

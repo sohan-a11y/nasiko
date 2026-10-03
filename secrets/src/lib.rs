@@ -71,6 +71,7 @@ const PLATFORM_SETTINGS_SCOPE: &[u8] = b"platform-settings-v1";
 /// (the tenant stop/start lifecycle). Distinct from every other
 /// scope so it can never collide with a real secret.
 const BACKUP_CANARY_SCOPE: &[u8] = b"nasiko-backup-canary-v1";
+const HOMOMORPH_SALT_SCOPE: &[u8] = b"nasiko-homomorph-salt-v1";
 
 pub struct SecretsCrypto {
     cipher: Aes256Gcm,
@@ -149,6 +150,26 @@ impl SecretsCrypto {
     /// master key is missing/invalid.
     pub fn for_platform_settings() -> Self {
         Self::derive(PLATFORM_SETTINGS_SCOPE)
+    }
+
+    /// Derive a 32-byte deployment HMAC salt for Homomorph identifier pseudonymization.
+    /// Derived from the platform master key via HKDF-SHA256, ensuring it is never in source.
+    pub fn homomorph_salt() -> Vec<u8> {
+        Self::try_homomorph_salt().unwrap_or_else(|_| {
+            let mut fallback = Vec::from(b"nasiko-test-homomorph-salt-only".as_slice());
+            fallback.resize(32, 0);
+            fallback
+        })
+    }
+
+    /// Fallible [`homomorph_salt`](Self::homomorph_salt).
+    pub fn try_homomorph_salt() -> Result<Vec<u8>, SecretsError> {
+        let master = try_load_master_key()?;
+        let hk = Hkdf::<Sha256>::new(None, &master);
+        let mut derived = [0u8; 32];
+        hk.expand(HOMOMORPH_SALT_SCOPE, &mut derived)
+            .map_err(|_| SecretsError::EncryptionFailed("HKDF expand failed for homomorph salt".into()))?;
+        Ok(derived.to_vec())
     }
 
     /// Derive a cipher from an EXPLICIT master key (base64, 32 bytes) rather
