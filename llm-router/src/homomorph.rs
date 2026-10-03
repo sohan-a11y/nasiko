@@ -52,8 +52,7 @@ pub fn apply_forward(
 
     for msg in &mut req.messages {
         if let Some(Value::String(s)) = msg.content.as_mut() {
-            let res: ForwardResult =
-                forward_transform(s, &mut ctx.table, &ctx.policy, &ctx.salt);
+            let res: ForwardResult = forward_transform(s, &mut ctx.table, &ctx.policy, &ctx.salt);
             if res.blocked {
                 return Err(
                     "request blocked: hardcoded credentials detected under Homomorph policy",
