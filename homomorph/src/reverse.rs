@@ -13,7 +13,7 @@ pub enum ReverseError {
 }
 
 static SURROGATE_PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\b(?:fn_|ty_|var_|tbl_|FN_|TY_|VAR_|TBL_|Fn|Ty|Var|Tbl)[0-9a-fA-F]{6}\b")
+    Regex::new(r"\b(?:fn_|ty_|var_|tbl_|FN_|TY_|VAR_|TBL_|Fn|Ty|Var|Tbl)[0-9a-fA-F]{12}\b")
         .unwrap_or_else(|_| unreachable!())
 });
 
@@ -64,7 +64,7 @@ pub struct StreamingHoldbackBuffer {
 
 impl Default for StreamingHoldbackBuffer {
     fn default() -> Self {
-        Self::new(32) // Surrogates are typically 9-12 chars (e.g. `fn_123456`)
+        Self::new(32) // Surrogates are typically 15-18 chars (e.g. `fn_123456789abc`)
     }
 }
 
@@ -90,12 +90,21 @@ impl StreamingHoldbackBuffer {
         }
 
         // Find a safe word boundary to split behind the max_holdback window
-        let split_target = self.buffer.len() - self.max_holdback;
+        let raw_target = self.buffer.len().saturating_sub(self.max_holdback);
+        let mut split_target = raw_target;
+        while split_target > 0 && !self.buffer.is_char_boundary(split_target) {
+            split_target -= 1;
+        }
+
         let mut split_point = split_target;
 
         // Walk backwards to find whitespace or punctuation
         while split_point > 0 {
-            if let Some(c) = self.buffer[..split_point].chars().next_back() {
+            if let Some(c) = self
+                .buffer
+                .get(..split_point)
+                .and_then(|s| s.chars().next_back())
+            {
                 if c.is_whitespace()
                     || c == ';'
                     || c == ','
@@ -104,10 +113,18 @@ impl StreamingHoldbackBuffer {
                     || c == ')'
                     || c == '{'
                     || c == '}'
+                    || c == '['
+                    || c == ']'
+                    || c == ':'
+                    || c == '\n'
+                    || c == '\r'
                 {
                     break;
                 }
-                split_point -= c.len_utf8();
+                split_point = split_point.saturating_sub(c.len_utf8());
+                while split_point > 0 && !self.buffer.is_char_boundary(split_point) {
+                    split_point -= 1;
+                }
             } else {
                 break;
             }
@@ -122,9 +139,12 @@ impl StreamingHoldbackBuffer {
             }
         }
 
-        let ready = &self.buffer[..split_point];
+        let ready = match self.buffer.get(..split_point) {
+            Some(r) => r,
+            None => return Ok(String::new()),
+        };
         let reversed = reverse_transform(ready, table)?;
-        self.buffer = self.buffer[split_point..].to_string();
+        self.buffer = self.buffer.get(split_point..).unwrap_or("").to_string();
 
         Ok(reversed)
     }
@@ -166,12 +186,12 @@ mod tests {
     #[test]
     fn test_unmapped_surrogate_fails_closed() {
         let table = SessionSymbolTable::new();
-        let fake_surrogate = "let res = fn_abcdef();";
+        let fake_surrogate = "let res = fn_abcdef012345();";
 
         let err = reverse_transform(fake_surrogate, &table).unwrap_err();
         assert_eq!(
             err,
-            ReverseError::UnmappedSurrogate("fn_abcdef".to_string())
+            ReverseError::UnmappedSurrogate("fn_abcdef012345".to_string())
         );
     }
 

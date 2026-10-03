@@ -424,7 +424,10 @@ pub fn extract_symbols(code: &str, policy: &HomomorphPolicy) -> Vec<ExtractedSym
             .or_else(|| trimmed.strip_prefix("pub struct "))
             .or_else(|| trimmed.strip_prefix("pub enum "))
             .or_else(|| trimmed.strip_prefix("enum "))
+            .or_else(|| trimmed.strip_prefix("public class "))
+            .or_else(|| trimmed.strip_prefix("private class "))
             .or_else(|| trimmed.strip_prefix("class "))
+            .or_else(|| trimmed.strip_prefix("public interface "))
             .or_else(|| trimmed.strip_prefix("interface "))
             .or_else(|| trimmed.strip_prefix("type "))
         {
@@ -437,6 +440,42 @@ pub fn extract_symbols(code: &str, policy: &HomomorphPolicy) -> Vec<ExtractedSym
                     &mut seen,
                     &mut symbols,
                 );
+            }
+        }
+
+        // Java / C# methods & fields: public / private [static] <return_type> <name> ...
+        if let Some(rest) = trimmed
+            .strip_prefix("public ")
+            .or_else(|| trimmed.strip_prefix("private "))
+            .or_else(|| trimmed.strip_prefix("protected "))
+        {
+            if !rest.starts_with("class ") && !rest.starts_with("interface ") && !rest.starts_with("enum ") {
+                let after_static = rest.strip_prefix("static ").unwrap_or(rest);
+                let parts: Vec<&str> = after_static.split_whitespace().collect();
+                if parts.len() >= 2 && parts[1].contains('(') {
+                    let method_name = parts[1].split('(').next().unwrap_or("");
+                    if let Some(ident) = extract_identifier(method_name) {
+                        maybe_add_symbol(
+                            ident,
+                            SymbolKind::Function,
+                            &protected,
+                            policy,
+                            &mut seen,
+                            &mut symbols,
+                        );
+                    }
+                } else if parts.len() >= 2 && after_static.contains('=') {
+                    if let Some(ident) = extract_identifier(parts[1]) {
+                        maybe_add_symbol(
+                            ident,
+                            SymbolKind::Variable,
+                            &protected,
+                            policy,
+                            &mut seen,
+                            &mut symbols,
+                        );
+                    }
+                }
             }
         }
 
@@ -521,7 +560,7 @@ fn extract_identifier(s: &str) -> Option<String> {
         return None;
     }
 
-    let ident = &s[..end];
+    let ident = s.get(..end).unwrap_or("");
     if ident.is_empty() {
         None
     } else {

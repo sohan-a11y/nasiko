@@ -88,6 +88,118 @@ const CORPUS: &[CorpusFixture] = &[
             }
         "#,
     },
+    CorpusFixture {
+        name: "ledger_reconciler",
+        language: "go",
+        sensitive_symbols: &[
+            "ReconcileAccountBalance",
+            "LedgerJournalEntry",
+            "maxReconciliationDelta",
+        ],
+        content: r#"
+            func ReconcileAccountBalance(accountID string, currentBalance float64) bool {
+                const maxReconciliationDelta = 0.001
+                return currentBalance >= 0
+            }
+
+            type LedgerJournalEntry struct {
+                entryID string
+                amount float64
+            }
+        "#,
+    },
+    CorpusFixture {
+        name: "order_settlement",
+        language: "java",
+        sensitive_symbols: &[
+            "settlePendingOrder",
+            "SettlementAuditRecord",
+            "clearingHouseMargin",
+        ],
+        content: r#"
+            public class SettlementAuditRecord {
+                private double clearingHouseMargin = 0.05;
+                public boolean settlePendingOrder(String tradeId, double principal) {
+                    return principal > 0;
+                }
+            }
+        "#,
+    },
+    CorpusFixture {
+        name: "key_derivation",
+        language: "rust",
+        sensitive_symbols: &[
+            "derive_tenant_hkdf_secret",
+            "TenantKeyMaterial",
+            "kdf_iteration_count",
+        ],
+        content: r#"
+            pub fn derive_tenant_hkdf_secret(tenant_id: &str) -> Vec<u8> {
+                let kdf_iteration_count = 10000;
+                vec![0u8; 32]
+            }
+
+            pub struct TenantKeyMaterial {
+                pub tenant_id: String,
+            }
+        "#,
+    },
+    CorpusFixture {
+        name: "scoring_pipeline",
+        language: "python",
+        sensitive_symbols: &[
+            "evaluate_risk_matrix",
+            "RiskInferenceModel",
+            "threshold_cutoff",
+        ],
+        content: r#"
+            def evaluate_risk_matrix(feature_vector, model_weights):
+                threshold_cutoff = 0.85
+                return len(feature_vector) > 0
+
+            class RiskInferenceModel:
+                def __init__(self, model_name):
+                    self.model_name = model_name
+        "#,
+    },
+    CorpusFixture {
+        name: "risk_warehouse",
+        language: "sql",
+        sensitive_symbols: &[
+            "confidential_risk_scores",
+            "underwriting_decisions",
+        ],
+        content: r#"
+            CREATE TABLE confidential_risk_scores (
+                score_id UUID PRIMARY KEY,
+                calculated_risk DOUBLE PRECISION NOT NULL
+            );
+
+            CREATE TABLE underwriting_decisions (
+                decision_id BIGINT PRIMARY KEY,
+                approved BOOLEAN NOT NULL
+            );
+        "#,
+    },
+    CorpusFixture {
+        name: "webhook_dispatcher",
+        language: "typescript",
+        sensitive_symbols: &[
+            "dispatchSignedWebhook",
+            "WebhookSigningPayload",
+            "maxRetryAttempts",
+        ],
+        content: r#"
+            function dispatchSignedWebhook(targetUrl: string, secretKey: string): boolean {
+                const maxRetryAttempts = 3;
+                return targetUrl.length > 0;
+            }
+
+            class WebhookSigningPayload {
+                signature: string;
+            }
+        "#,
+    },
 ];
 
 fn main() {
@@ -98,7 +210,6 @@ fn main() {
 
     let mut total_sensitive_found_egress = 0usize;
     let mut total_reversibility_matches = 0usize;
-    let mut latencies_us = Vec::new();
 
     for fixture in CORPUS {
         let mut table = SessionSymbolTable::new();
@@ -106,7 +217,6 @@ fn main() {
         let start = Instant::now();
         let fwd = forward_transform(fixture.content, &mut table, &policy, salt);
         let elapsed = start.elapsed().as_micros() as u64;
-        latencies_us.push(elapsed);
 
         // Check 1: Sensitive identifier leakage in egress payload (target = 0)
         let mut leaked_in_fixture = 0;
@@ -135,6 +245,17 @@ fn main() {
         );
     }
 
+    // Benchmark loop: 100 iterations per fixture (1,000 runs total) for statistically sound latency distribution
+    let mut latencies_us = Vec::with_capacity(CORPUS.len() * 100);
+    for _ in 0..100 {
+        for fixture in CORPUS {
+            let mut table = SessionSymbolTable::new();
+            let start = Instant::now();
+            let _ = forward_transform(fixture.content, &mut table, &policy, salt);
+            latencies_us.push(start.elapsed().as_micros() as u64);
+        }
+    }
+
     latencies_us.sort_unstable();
     let p50 = latencies_us[latencies_us.len() / 2];
     let p95_idx = ((latencies_us.len() as f64) * 0.95) as usize;
@@ -142,6 +263,10 @@ fn main() {
 
     println!("---------------------------------------------------------------");
     println!("SUMMARY:");
+    println!(
+        "- Total fixtures evaluated:            {}",
+        CORPUS.len()
+    );
     println!(
         "- Total sensitive identifiers tested: {}",
         CORPUS
@@ -157,6 +282,10 @@ fn main() {
         "- Exact roundtrip reversibility:       {}/{} (100.0%)",
         total_reversibility_matches,
         CORPUS.len()
+    );
+    println!(
+        "- Forward transform sample size:       {} runs",
+        latencies_us.len()
     );
     println!("- Forward transform latency p50:       {} µs", p50);
     println!("- Forward transform latency p95:       {} µs", p95);

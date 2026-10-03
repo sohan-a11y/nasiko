@@ -55,4 +55,29 @@ proptest! {
 
         prop_assert_eq!(reconstructed, code);
     }
+
+    #[test]
+    fn prop_streaming_multibyte_utf8_invariance(
+        chunk_chars in 1usize..6usize,
+    ) {
+        let code = "fn compute_résumé(val: €uro) -> String { let 日本語 = \"こんにちは\"; 日本語 }";
+        let policy = HomomorphPolicy::default();
+        let mut table = SessionSymbolTable::new();
+        let salt = b"streaming-multibyte-salt";
+
+        let fwd = forward_transform(code, &mut table, &policy, salt);
+        let mut stream = StreamingHoldbackBuffer::new(16);
+        let mut reconstructed = String::new();
+
+        let chars: Vec<char> = fwd.text.chars().collect();
+        for char_chunk in chars.chunks(chunk_chars) {
+            let s: String = char_chunk.iter().collect();
+            let out = stream.push(&s, &table).expect("push must not panic on multibyte");
+            reconstructed.push_str(&out);
+        }
+        let final_chunk = stream.finish(&table).expect("finish must succeed");
+        reconstructed.push_str(&final_chunk);
+
+        prop_assert_eq!(reconstructed, code);
+    }
 }

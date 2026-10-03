@@ -47,7 +47,8 @@ pub fn scan_secrets(text: &str) -> Vec<SecretFinding> {
 
     // 2. Known API key provider formats
     for m in API_KEY_REGEX.find_iter(text) {
-        let snippet = format!("{}...", &m.as_str()[..8.min(m.as_str().len())]);
+        let prefix = crate::slice::safe_slice_to(m.as_str(), 8);
+        let snippet = format!("{prefix}...");
         findings.push(SecretFinding {
             kind: "api_key",
             start: m.start(),
@@ -60,14 +61,20 @@ pub fn scan_secrets(text: &str) -> Vec<SecretFinding> {
     for caps in ENV_SECRET_REGEX.captures_iter(text) {
         if let Some(val_match) = caps.get(2) {
             let val = val_match.as_str();
-            // Filter out obvious false positives like dummy defaults
-            if val != "true"
-                && val != "false"
-                && val != "null"
-                && val != "undefined"
-                && !val.starts_with("${")
+            let trimmed_val = val.trim_matches(|c| c == ';' || c == ',' || c == ')' || c == '{' || c == ':' || c == '(' || c == '}');
+            // Filter out obvious false positives like dummy defaults and type annotations
+            if trimmed_val != "true"
+                && trimmed_val != "false"
+                && trimmed_val != "null"
+                && trimmed_val != "undefined"
+                && trimmed_val != "string"
+                && trimmed_val != "boolean"
+                && trimmed_val != "number"
+                && !trimmed_val.starts_with("${")
+                && trimmed_val.len() >= 8
             {
-                let snippet = format!("{}...", &val[..4.min(val.len())]);
+                let prefix = crate::slice::safe_slice_to(val, 4);
+                let snippet = format!("{prefix}...");
                 findings.push(SecretFinding {
                     kind: "env_secret",
                     start: val_match.start(),
@@ -104,14 +111,14 @@ pub fn redact_secrets(text: &str, findings: &[SecretFinding]) -> String {
             continue; // Skip overlapping
         }
         if finding.start > cursor {
-            result.push_str(&text[cursor..finding.start]);
+            result.push_str(crate::slice::safe_slice(text, cursor, finding.start));
         }
         result.push_str(&format!("[REDACTED:{}]", finding.kind));
         cursor = finding.end;
     }
 
     if cursor < text.len() {
-        result.push_str(&text[cursor..]);
+        result.push_str(crate::slice::safe_slice_from(text, cursor));
     }
 
     result
