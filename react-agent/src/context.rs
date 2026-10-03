@@ -21,6 +21,8 @@ pub struct ContextConfig {
     pub compress: Policy<'static>,
     /// Compaction mode for handling turns older than keep_recent.
     pub compaction_mode: CompactionMode,
+    /// Token budget for the summary before compacting the summary itself.
+    pub max_summary_tokens: usize,
 }
 
 /// Strategy for compacting entries older than `keep_recent`.
@@ -32,8 +34,6 @@ pub enum CompactionMode {
     /// Continuous ledger-verified synthesis: entries leaving the window are folded
     /// immediately into the summary with zero silent invisibility window.
     Synthesized,
-    /// LLM-generated summary constrained by semantic ledger must-keep facts.
-    Llm,
 }
 
 impl Default for ContextConfig {
@@ -44,6 +44,7 @@ impl Default for ContextConfig {
             chars_per_token: 4,
             compress: Policy::default(),
             compaction_mode: CompactionMode::Simple,
+            max_summary_tokens: 40_000,
         }
     }
 }
@@ -162,7 +163,48 @@ impl ContextManager {
             None => summary_line,
         };
         self.summary = Some(new_summary);
+
+        let summary_tokens = self
+            .summary
+            .as_ref()
+            .map(|s| s.len() / self.config.chars_per_token)
+            .unwrap_or(0);
+        if summary_tokens > self.config.max_summary_tokens {
+            self.compact_summary();
+        }
+
         self.recalculate_tokens();
+    }
+
+    /// Compact the summary itself when it exceeds the summary token budget (B5).
+    fn compact_summary(&mut self) {
+        let Some(summary) = self.summary.take() else {
+            return;
+        };
+        let lines: Vec<&str> = summary.lines().collect();
+        if lines.len() <= 2 {
+            self.summary = Some(summary);
+            return;
+        }
+
+        let cut_point = lines.len() / 2;
+        let old_lines = lines[..cut_point].join("\n");
+        let handle = format!("ctx_sum_{:08x}", {
+            let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+            for b in old_lines.as_bytes() {
+                h ^= *b as u64;
+                h = h.wrapping_mul(0x1000_0000_01b3);
+            }
+            h as u32
+        });
+        self.recovery_store.store(&handle, old_lines);
+
+        let marker = format!(
+            "[⋯ {} prior summary turns elided · recover: {} ⋯]",
+            cut_point, handle
+        );
+        let remaining = lines[cut_point..].join("\n");
+        self.summary = Some(format!("{marker}\n{remaining}"));
     }
 
     pub fn needs_compaction(&self) -> bool {
@@ -185,9 +227,28 @@ impl ContextManager {
         }
     }
 
+    /// Compact older entries according to the configured compaction_mode (B5).
+    pub fn compact(&mut self) {
+        match self.config.compaction_mode {
+            CompactionMode::Simple => self.compact_simple(),
+            CompactionMode::Synthesized => {
+                while self.entries.len() > self.config.keep_recent {
+                    self.fold_oldest_into_synthesized_summary();
+                }
+                let summary_tokens = self
+                    .summary
+                    .as_ref()
+                    .map(|s| s.len() / self.config.chars_per_token)
+                    .unwrap_or(0);
+                if summary_tokens > self.config.max_summary_tokens {
+                    self.compact_summary();
+                    self.recalculate_tokens();
+                }
+            }
+        }
+    }
+
     /// Compact older entries into a summary string.
-    /// In production, call `compaction_prompt()` and send to an LLM,
-    /// then use `apply_summary()` with the result.
     pub fn compact_simple(&mut self) {
         if self.entries.len() <= self.config.keep_recent {
             return;
@@ -224,86 +285,10 @@ impl ContextManager {
         self.recalculate_tokens();
     }
 
-    /// Generates a prompt you can send to an LLM to produce a proper summary.
-    pub fn compaction_prompt(&self) -> Option<String> {
-        if self.entries.len() <= self.config.keep_recent {
-            return None;
-        }
-
-        let split_at = self.entries.len() - self.config.keep_recent;
-        let old = &self.entries[..split_at];
-
-        let mut prompt = String::from(
-            "Summarize this conversation history concisely. \
-             Preserve: key facts, tool results, decisions made, and pending sub-tasks.\n\n",
-        );
-
-        if let Some(ref s) = self.summary {
-            prompt.push_str(&format!("=== Prior Summary ===\n{s}\n\n"));
-        }
-
-        prompt.push_str("=== Messages ===\n");
-        for entry in old {
-            let label = match &entry.role {
-                ContextRole::User => "User",
-                ContextRole::Assistant => "Assistant",
-                ContextRole::ToolResult { tool_name } => tool_name.as_str(),
-                ContextRole::System => "System",
-            };
-            prompt.push_str(&format!("[{label}]: {}\n", entry.content));
-        }
-
-        if self.config.compaction_mode == CompactionMode::Llm {
-            let mut all_ledger = Vec::new();
-            for entry in old {
-                let anchors = nasiko_semantic_synth::extract_anchors(&entry.content);
-                let ledger = nasiko_semantic_synth::extract_ledger(
-                    &entry.content,
-                    nasiko_compress::detect(&entry.content),
-                    &anchors,
-                    true,
-                );
-                all_ledger.extend(ledger);
-            }
-            if !all_ledger.is_empty() {
-                prompt.push_str("\n=== MUST-PRESERVE FACTS (SEMANTIC LEDGER) ===\n");
-                for item in &all_ledger {
-                    prompt.push_str(&format!("- {}\n", item.content.trim()));
-                }
-            }
-        }
-
-        Some(prompt)
-    }
-
-    /// Apply an LLM-generated summary and drop the old entries.
+    /// Apply an external summary and drop the old entries.
     pub fn apply_summary(&mut self, summary: String) {
         let split_at = self.entries.len().saturating_sub(self.config.keep_recent);
         if split_at > 0 {
-            if self.config.compaction_mode == CompactionMode::Llm {
-                let old = &self.entries[..split_at];
-                let mut all_ledger = Vec::new();
-                for entry in old {
-                    let anchors = nasiko_semantic_synth::extract_anchors(&entry.content);
-                    let ledger = nasiko_semantic_synth::extract_ledger(
-                        &entry.content,
-                        nasiko_compress::detect(&entry.content),
-                        &anchors,
-                        true,
-                    );
-                    all_ledger.extend(ledger);
-                }
-                let missing_any = all_ledger
-                    .iter()
-                    .any(|item| !summary.contains(&item.content));
-                if missing_any {
-                    tracing::warn!(
-                        "LLM summary dropped semantic ledger facts; falling back to Synthesized mode"
-                    );
-                    self.compact_simple();
-                    return;
-                }
-            }
             self.entries.drain(..split_at);
         }
         self.summary = Some(summary);
@@ -376,6 +361,7 @@ mod tests {
     fn small_keep_recent_config() -> ContextConfig {
         ContextConfig {
             max_context_tokens: 1_000_000,
+            max_summary_tokens: 40_000,
             keep_recent: 1,
             chars_per_token: 4,
             compress: Policy::default(),
@@ -565,20 +551,29 @@ mod tests {
     }
 
     #[test]
-    fn test_llm_mode_fallback_when_ledger_dropped() {
+    fn test_synthesized_mode_summary_budget_compaction() {
         let mut ctx = ContextManager::new(ContextConfig {
             keep_recent: 1,
-            compaction_mode: CompactionMode::Llm,
+            compaction_mode: CompactionMode::Synthesized,
+            max_summary_tokens: 30,
+            chars_per_token: 4,
             ..Default::default()
         });
-        ctx.push_user("NOTE: Never allow unauthorized refunds");
-        ctx.push_user("turn 1");
 
-        // Apply a summary that drops the required ledger fact
-        ctx.apply_summary("User discussed general account policies.".into());
+        for i in 0..10 {
+            ctx.push_user(&format!(
+                "Turn {i}: Detailed user message with sufficient text to exceed the summary token budget limit"
+            ));
+        }
 
-        // Should fall back and preserve via compact_simple
-        let summary = ctx.window().summary.expect("Summary set after fallback");
-        assert!(summary.contains("Never allow unauthorized refunds"));
+        let summary = ctx.window().summary.expect("Summary must exist in synthesized mode");
+        assert!(
+            summary.contains("prior summary turns elided"),
+            "summary must compact itself when exceeding budget: {summary}"
+        );
+        assert!(
+            !ctx.recovery_store().is_empty(),
+            "recovery store must hold elided summary text"
+        );
     }
 }

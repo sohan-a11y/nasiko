@@ -292,6 +292,7 @@ fn contains_state_change_verb(s: &str) -> bool {
         "stopped",
         "invalidated",
         "evicted",
+        "evict",
         "retry",
         "retrying",
         "timeout",
@@ -302,6 +303,13 @@ fn contains_state_change_verb(s: &str) -> bool {
         "failure",
         "connected",
         "disconnected",
+        "reloaded",
+        "reload",
+        "reloading",
+        "reconfigured",
+        "reconfig",
+        "reindexing",
+        "reindex",
     ] {
         if lower.contains(verb) {
             return true;
@@ -366,21 +374,67 @@ fn is_code_constant(s: &str) -> bool {
         || s.starts_with("pub static ")
 }
 
-/// Compute a normalized template signature by masking variable numbers and hashes.
+/// Compute a normalized template signature by masking variable numbers, IDs and timestamps (B2).
 fn compute_log_template(line: &str) -> String {
     let mut template = String::with_capacity(line.len());
     for token in line.split_whitespace() {
-        if token
-            .chars()
-            .all(|c| c.is_ascii_digit() || c == '.' || c == ':')
-        {
+        if is_timestamp(token) {
+            template.push_str("<TS> ");
+        } else if let Some((k, v)) = token.split_once('=') {
+            if is_number(v) || is_id_token(v) || (v.len() >= 4 && (v.contains(':') || v.contains('-'))) {
+                template.push_str(k);
+                template.push_str("=<VAL> ");
+            } else {
+                template.push_str(token);
+                template.push(' ');
+            }
+        } else if is_number(token) {
             template.push_str("<NUM> ");
         } else if token.len() >= 8 && token.chars().all(|c| c.is_ascii_hexdigit()) {
             template.push_str("<HEX> ");
+        } else if is_id_token(token) {
+            template.push_str("<ID> ");
         } else {
             template.push_str(token);
             template.push(' ');
         }
     }
     template
+}
+
+fn is_timestamp(token: &str) -> bool {
+    let t = token.trim_matches(|c: char| c == '[' || c == ']' || c == '(' || c == ')');
+    if t.len() >= 8 {
+        let first_is_digit = t.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false);
+        if first_is_digit {
+            // ISO 8601: 2026-01-01... or time 12:00:00...
+            if (t.contains('-') && t.contains(':'))
+                || (t.contains('T') && t.contains(':'))
+                || (t.len() == 10 && t.chars().filter(|&c| c == '-').count() == 2)
+                || (t.chars().filter(|&c| c == ':').count() >= 2)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_number(token: &str) -> bool {
+    let t = token.trim_matches(|c: char| c == '[' || c == ']' || c == '(' || c == ')' || c == ',');
+    !t.is_empty()
+        && t.chars().all(|c| c.is_ascii_digit() || c == '.' || c == '-')
+        && t.chars().any(|c| c.is_ascii_digit())
+}
+
+fn is_id_token(token: &str) -> bool {
+    let t = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '_' && c != '-');
+    if t.len() >= 2 && t.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+        let has_digit = t.chars().any(|c| c.is_ascii_digit());
+        let has_alpha = t.chars().any(|c| c.is_ascii_alphabetic());
+        if has_digit && has_alpha {
+            return true;
+        }
+    }
+    false
 }
