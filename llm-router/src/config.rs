@@ -154,6 +154,11 @@ pub struct GatewayConfig {
     pub compress_recovery_min_bytes: usize,
     /// How long an original stays recoverable. Sized to outlive the flow that produced it.
     pub compress_recovery_ttl_secs: u64,
+
+    /// Homomorph identifier pseudonymization (Phase 4). Default off.
+    pub homomorph_enabled: bool,
+    /// Fleet-wide kill switch for Homomorph.
+    pub homomorph_kill_switch: bool,
 }
 
 impl Default for GatewayConfig {
@@ -196,6 +201,8 @@ impl Default for GatewayConfig {
             compress_recovery_enabled: true,
             compress_recovery_min_bytes: 8192,
             compress_recovery_ttl_secs: 86_400,
+            homomorph_enabled: false,
+            homomorph_kill_switch: false,
         }
     }
 }
@@ -308,6 +315,8 @@ impl GatewayConfig {
                 "TOKEN_COMPRESS_RECOVERY_TTL_SECS",
                 d.compress_recovery_ttl_secs as usize,
             ) as u64,
+            homomorph_enabled: env_flag("HOMOMORPH_ENABLED", false),
+            homomorph_kill_switch: env_flag("HOMOMORPH_KILL_SWITCH", false),
         }
     }
 

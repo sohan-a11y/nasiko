@@ -32,6 +32,7 @@ mod compress;
 pub mod config;
 pub mod error;
 pub mod handlers;
+pub mod homomorph;
 pub mod inbound;
 pub mod inject;
 pub mod ir;
