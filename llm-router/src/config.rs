@@ -162,6 +162,10 @@ pub struct GatewayConfig {
     pub synth_enabled: bool,
     /// Fleet-wide kill switch for semantic synthesis.
     pub synth_kill_switch: bool,
+    /// Homomorph identifier pseudonymization (Phase 4). Default off.
+    pub homomorph_enabled: bool,
+    /// Fleet-wide kill switch for Homomorph.
+    pub homomorph_kill_switch: bool,
 }
 
 impl Default for GatewayConfig {
@@ -207,6 +211,8 @@ impl Default for GatewayConfig {
             compact_tools_enabled: false,
             synth_enabled: false,
             synth_kill_switch: true,
+            homomorph_enabled: false,
+            homomorph_kill_switch: false,
         }
     }
 }
@@ -322,6 +328,8 @@ impl GatewayConfig {
             compact_tools_enabled: env_flag("COMPACT_TOOLS_ENABLED", d.compact_tools_enabled),
             synth_enabled: env_flag("TOKEN_SYNTH_ENABLED", d.synth_enabled),
             synth_kill_switch: env_flag("TOKEN_SYNTH_KILL_SWITCH", d.synth_kill_switch),
+            homomorph_enabled: env_flag("HOMOMORPH_ENABLED", false),
+            homomorph_kill_switch: env_flag("HOMOMORPH_KILL_SWITCH", false),
         }
     }
 

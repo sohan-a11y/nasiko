@@ -1,0 +1,20 @@
+[package]
+name = "nasiko-homomorph"
+version.workspace = true
+edition.workspace = true
+license = "Apache-2.0"
+description = "Reversible, policy-driven identifier pseudonymization for coding-agent traffic"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+thiserror = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+hex = { workspace = true }
+uuid = { workspace = true }
+nasiko-secrets = { workspace = true }
+
+[dev-dependencies]
+proptest = "1.6"

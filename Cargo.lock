@@ -3611,6 +3611,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "nasiko-homomorph"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "hmac 0.12.1",
+ "nasiko-secrets",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "uuid",
+]
+
+[[package]]
 name = "nasiko-llm-router"
 version = "0.1.0"
 dependencies = [
@@ -3625,6 +3641,7 @@ dependencies = [
  "jsonwebtoken",
  "mockito",
  "nasiko-compress",
+ "nasiko-homomorph",
  "nasiko-pricing",
  "nasiko-savings",
  "nasiko-secrets",

@@ -28,6 +28,7 @@ members = [
     "bench-support",
     "tool-compact",
     "semantic-synth",
+    "homomorph",
 ]
 
 [workspace.package]
@@ -39,6 +40,7 @@ version = "0.1.0"
 nasiko-auth = { path = "auth" }
 nasiko-compress = { path = "compress" }
 nasiko-semantic-synth = { path = "semantic-synth" }
+nasiko-homomorph = { path = "homomorph" }
 nasiko-config = { path = "config" }
 nasiko-pricing = { path = "pricing" }
 nasiko-savings = { path = "savings" }
