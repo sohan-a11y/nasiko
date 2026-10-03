@@ -154,6 +154,11 @@ pub struct GatewayConfig {
     pub compress_recovery_min_bytes: usize,
     /// How long an original stays recoverable. Sized to outlive the flow that produced it.
     pub compress_recovery_ttl_secs: u64,
+
+    /// Opt-in semantic synthesis mode at the router seam. Defaults to false.
+    pub synth_enabled: bool,
+    /// Fleet-wide kill switch for semantic synthesis.
+    pub synth_kill_switch: bool,
 }
 
 impl Default for GatewayConfig {
@@ -196,6 +201,8 @@ impl Default for GatewayConfig {
             compress_recovery_enabled: true,
             compress_recovery_min_bytes: 8192,
             compress_recovery_ttl_secs: 86_400,
+            synth_enabled: false,
+            synth_kill_switch: true,
         }
     }
 }
@@ -308,6 +315,8 @@ impl GatewayConfig {
                 "TOKEN_COMPRESS_RECOVERY_TTL_SECS",
                 d.compress_recovery_ttl_secs as usize,
             ) as u64,
+            synth_enabled: env_flag("TOKEN_SYNTH_ENABLED", d.synth_enabled),
+            synth_kill_switch: env_flag("TOKEN_SYNTH_KILL_SWITCH", d.synth_kill_switch),
         }
     }
 

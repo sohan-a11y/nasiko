@@ -26,6 +26,7 @@ members = [
     "github",
     "bench",
     "bench-support",
+    "semantic-synth",
 ]
 
 [workspace.package]
@@ -36,6 +37,7 @@ version = "0.1.0"
 # ─── Internal OSS crates ────────────────────────────────────────────────────
 nasiko-auth = { path = "auth" }
 nasiko-compress = { path = "compress" }
+nasiko-semantic-synth = { path = "semantic-synth" }
 nasiko-config = { path = "config" }
 nasiko-pricing = { path = "pricing" }
 nasiko-savings = { path = "savings" }
