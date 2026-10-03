@@ -99,7 +99,7 @@ fn synthesize_code_skeleton(
             // Flush any pending elision block
             if !eliding_lines.is_empty() {
                 let elision_text = eliding_lines.join("\n");
-                let handle = mint_handle(policy, elision_start_line);
+                let handle = mint_handle(policy, elision_start_line, code, &elision_text);
                 let marker = format!(
                     "[⋯ {} lines elided · recover: {} ⋯]\n",
                     eliding_lines.len(),
@@ -132,7 +132,7 @@ fn synthesize_code_skeleton(
     // Flush trailing elision block
     if !eliding_lines.is_empty() {
         let elision_text = eliding_lines.join("\n");
-        let handle = mint_handle(policy, elision_start_line);
+        let handle = mint_handle(policy, elision_start_line, code, &elision_text);
         let marker = format!(
             "[⋯ {} lines elided · recover: {} ⋯]\n",
             eliding_lines.len(),
@@ -164,34 +164,108 @@ fn synthesize_structured(
 ) -> String {
     // Run base structural compression
     let compressed = nasiko_compress::compress(payload, &policy.compress);
+    if !compressed.is_changed() {
+        return payload.to_string();
+    }
     let comp_text = compressed.text();
 
-    // Check which ledger items are missing in compressed text
-    let missing_items: Vec<&LedgerItem> = ledger
-        .iter()
-        .filter(|item| !comp_text.contains(&item.content))
-        .collect();
+    let payload_lines: Vec<&str> = payload.lines().collect();
+    let comp_lines: Vec<&str> = comp_text.lines().collect();
 
-    if missing_items.is_empty() {
-        return comp_text.to_string();
+    let mut out = String::with_capacity(comp_text.len());
+    let mut p_idx = 0;
+
+    for (c_idx, c_line) in comp_lines.iter().enumerate() {
+        let trimmed = c_line.trim();
+        if trimmed.starts_with("[⋯ ") && trimmed.ends_with(" ⋯]") {
+            // Find the next kept line in comp_lines to know where this elision ends in payload_lines
+            let mut next_kept = None;
+            for next_c in &comp_lines[c_idx + 1..] {
+                let next_trimmed = next_c.trim();
+                if !(next_trimmed.starts_with("[⋯ ") && next_trimmed.ends_with(" ⋯]")) {
+                    next_kept = Some(*next_c);
+                    break;
+                }
+            }
+
+            let end_p_idx = match next_kept {
+                Some(target) => {
+                    let mut found = payload_lines.len();
+                    for (idx, line) in payload_lines.iter().enumerate().skip(p_idx) {
+                        if line == &target {
+                            found = idx;
+                            break;
+                        }
+                    }
+                    found
+                }
+                None => payload_lines.len(),
+            };
+
+            let start_line = p_idx + 1;
+            let end_line = end_p_idx.max(start_line);
+            let elision_text = if p_idx < end_p_idx && p_idx < payload_lines.len() {
+                payload_lines[p_idx..end_p_idx.min(payload_lines.len())].join("\n")
+            } else {
+                String::new()
+            };
+
+            let handle = mint_handle(policy, start_line, payload, &elision_text);
+            elided_spans.push(ElidedSpan {
+                handle: handle.clone(),
+                start_line,
+                end_line,
+                original_text: elision_text,
+            });
+
+            // Extract the base marker description without any prior recover handle
+            let inner = trimmed
+                .strip_prefix("[⋯ ")
+                .and_then(|s| s.strip_suffix(" ⋯]"))
+                .unwrap_or(trimmed);
+            let clean_desc = inner.split(" · recover:").next().unwrap_or(inner);
+            let indent = c_line.strip_suffix(trimmed).unwrap_or("");
+            out.push_str(&format!("{indent}[⋯ {clean_desc} · recover: {handle} ⋯]\n"));
+
+            p_idx = end_p_idx;
+        } else {
+            // Find where this kept line is in payload_lines and advance p_idx past it
+            for (idx, line) in payload_lines.iter().enumerate().skip(p_idx) {
+                if line == c_line {
+                    p_idx = idx + 1;
+                    break;
+                }
+            }
+            out.push_str(c_line);
+            out.push('\n');
+        }
     }
 
-    // Re-inject missing ledger items with markers
-    let mut out = comp_text.to_string();
-    out.push_str("\n\n[⋯ Semantic Ledger Re-injections ⋯]\n");
+    // Now check which ledger items are missing in output
+    let missing_items: Vec<&LedgerItem> = ledger
+        .iter()
+        .filter(|item| !out.contains(&item.content))
+        .collect();
 
-    for item in missing_items {
-        let handle = mint_handle(policy, item.line_number);
-        elided_spans.push(ElidedSpan {
-            handle: handle.clone(),
-            start_line: item.line_number,
-            end_line: item.line_number,
-            original_text: item.content.clone(),
-        });
-        out.push_str(&format!(
-            "[⋯ line {}: {} · recover: {} ⋯]\n",
-            item.line_number, item.content, handle
-        ));
+    if !missing_items.is_empty() {
+        out.push_str("\n[⋯ Semantic Ledger Re-injections ⋯]\n");
+        for item in missing_items {
+            let handle = mint_handle(policy, item.line_number, payload, &item.content);
+            elided_spans.push(ElidedSpan {
+                handle: handle.clone(),
+                start_line: item.line_number,
+                end_line: item.line_number,
+                original_text: item.content.clone(),
+            });
+            out.push_str(&format!(
+                "[⋯ line {}: {} · recover: {} ⋯]\n",
+                item.line_number, item.content, handle
+            ));
+        }
+    }
+
+    if !payload.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
     }
 
     out
@@ -226,13 +300,28 @@ fn unchanged(
     }
 }
 
-fn mint_handle(policy: &SynthPolicy<'_>, line: usize) -> String {
-    let prefix = policy.recovery_prefix.as_deref().unwrap_or("synth");
-    // FNV-1a hash of line and prefix for deterministic handles
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in prefix.as_bytes().iter().chain(line.to_string().as_bytes()) {
-        hash ^= *byte as u64;
+fn mint_handle(policy: &SynthPolicy<'_>, line: usize, payload: &str, content: &str) -> String {
+    if let Some(ref prefix) = policy.recovery_prefix {
+        // FNV-1a hash of prefix, line, payload hash, and content hash (B4: prevent collision across entries)
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in prefix.as_bytes().iter().chain(line.to_string().as_bytes()) {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+        // Incorporate payload length and hash so distinct payloads/entries never collide
+        hash ^= payload.len() as u64;
         hash = hash.wrapping_mul(0x1000_0000_01b3);
+        for byte in payload.as_bytes().iter().step_by(16.max(payload.len() / 64)) {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+        for byte in content.as_bytes() {
+            hash ^= *byte as u64;
+            hash = hash.wrapping_mul(0x1000_0000_01b3);
+        }
+        format!("{prefix}_{:08x}", hash as u32)
+    } else {
+        // Router-compatible UUID handle
+        uuid::Uuid::new_v4().to_string()
     }
-    format!("{prefix}_{:08x}", hash as u32)
 }

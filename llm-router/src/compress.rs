@@ -175,43 +175,66 @@ fn compress_content_synth(
     anchors: &[String],
     stats: &mut CompressionStats,
 ) {
-    if let Value::String(s) = content {
-        let synth_policy = nasiko_semantic_synth::SynthPolicy {
-            compress: Policy {
-                types: policy.types,
-                level: policy.level,
-                enabled: policy.enabled,
-                min_bytes: policy.min_bytes,
-                dry_run: policy.dry_run,
-                max_input_bytes: policy.max_input_bytes,
-                recovery_ref: None,
-            },
-            enable_code_synth: false,
-            recovery_prefix: Some("rtr_rec".into()),
-        };
+    match content {
+        Value::String(s) => compress_str_synth(s, policy, recovery, anchors, stats),
+        Value::Array(parts) => {
+            for part in parts.iter_mut() {
+                if part.get("type").and_then(Value::as_str) != Some("text") {
+                    continue;
+                }
+                if let Some(Value::String(text)) = part.get_mut("text") {
+                    compress_str_synth(text, policy, recovery, anchors, stats);
+                }
+            }
+        }
+        _ => {}
+    }
+}
 
-        let orig_len = s.len();
-        let synthesized = nasiko_semantic_synth::synthesize(s, anchors, &synth_policy);
-        if synthesized.was_synthesized {
-            stats.messages_touched += 1;
-            stats.bytes_in += orig_len;
-            stats.bytes_out += synthesized.text.len();
-            stats.by_type[ContentType::Log.index()] += 1;
+fn compress_str_synth(
+    s: &mut String,
+    policy: &Policy<'_>,
+    recovery: Option<Recovery>,
+    anchors: &[String],
+    stats: &mut CompressionStats,
+) {
+    let synth_policy = nasiko_semantic_synth::SynthPolicy {
+        compress: Policy {
+            types: policy.types,
+            level: policy.level,
+            enabled: policy.enabled,
+            min_bytes: policy.min_bytes,
+            dry_run: policy.dry_run,
+            max_input_bytes: policy.max_input_bytes,
+            recovery_ref: None,
+        },
+        enable_code_synth: false,
+        recovery_prefix: None, // None ensures valid UUID handles compatible with router recovery
+    };
 
-            if let Some(_rec) = recovery {
-                for span in synthesized.elided_spans {
-                    let handle = uuid::Uuid::new_v4();
+    let orig_len = s.len();
+    let synthesized = nasiko_semantic_synth::synthesize(s, anchors, &synth_policy);
+    if synthesized.was_synthesized {
+        let content_type = nasiko_compress::detect(s);
+        stats.messages_touched += 1;
+        stats.bytes_in += orig_len;
+        stats.bytes_out += synthesized.text.len();
+        stats.by_type[content_type.index()] += 1;
+
+        if let Some(_rec) = recovery {
+            for span in synthesized.elided_spans {
+                if let Ok(handle) = span.handle.parse::<uuid::Uuid>() {
                     stats.originals.push(Original {
                         handle,
                         content: span.original_text,
-                        content_type: "synth",
+                        content_type: content_type.as_label(),
                     });
                 }
             }
+        }
 
-            if !policy.dry_run {
-                *s = synthesized.text;
-            }
+        if !policy.dry_run {
+            *s = synthesized.text;
         }
     }
 }
@@ -614,5 +637,28 @@ mod tests {
         assert!(stats.applied);
         let content = r.messages[1].content.as_ref().unwrap().as_str().unwrap();
         assert!(content.contains("tenant_critical"));
+    }
+
+    #[test]
+    fn test_synth_recovery_round_trip() {
+        let log = noisy_log();
+        let mut r = req(vec![
+            msg("user", json!("investigate failure")),
+            msg("tool", json!(log.clone())),
+        ]);
+
+        let stats = apply_with_synth(&mut r, &on(), recovery(), true);
+        assert!(stats.applied);
+        assert!(!stats.originals.is_empty(), "must yield recovery originals");
+
+        let sent = r.messages[1].content.as_ref().unwrap().as_str().unwrap();
+        for orig in &stats.originals {
+            assert!(
+                sent.contains(&orig.handle.to_string()),
+                "text sent to model must carry the exact handle stored in originals: {}",
+                orig.handle
+            );
+            assert_eq!(orig.content_type, "log", "must detect content type correctly");
+        }
     }
 }

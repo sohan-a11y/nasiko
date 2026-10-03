@@ -396,7 +396,7 @@ impl Orchestrator {
         self.context.push_user(user_query);
 
         if self.context.needs_compaction() {
-            self.context.compact_simple();
+            self.context.compact();
             tracing::info!(
                 tokens = self.context.estimated_tokens(),
                 "context compacted"
@@ -643,7 +643,7 @@ impl Orchestrator {
 
             // Mid-loop compaction check
             if self.context.needs_compaction() {
-                self.context.compact_simple();
+                self.context.compact();
                 context_compacted = true;
                 tracing::info!(
                     tokens = self.context.estimated_tokens(),
@@ -763,7 +763,7 @@ async fn run_stream_inner(
     context.push_user(user_query);
 
     if context.needs_compaction() {
-        context.compact_simple();
+        context.compact();
     }
 
     let agents = registry.agents().await;
@@ -1357,7 +1357,7 @@ async fn run_stream_inner(
         } // end streaming else branch
 
         if context.needs_compaction() {
-            context.compact_simple();
+            context.compact();
             context_compacted = true;
         }
     }
