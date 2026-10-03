@@ -3628,6 +3628,7 @@ dependencies = [
  "nasiko-pricing",
  "nasiko-savings",
  "nasiko-secrets",
+ "nasiko-semantic-synth",
  "nasiko-tool-compact",
  "rand 0.9.5",
  "rand_distr",
@@ -3797,6 +3798,7 @@ dependencies = [
  "mockito",
  "nasiko-compress",
  "nasiko-llm-router",
+ "nasiko-semantic-synth",
  "nasiko-types",
  "reqwest",
  "rig-core",
@@ -3846,6 +3848,19 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "uuid",
+]
+
+[[package]]
+name = "nasiko-semantic-synth"
+version = "0.1.0"
+dependencies = [
+ "nasiko-compress",
+ "proptest",
+ "rand 0.8.7",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]

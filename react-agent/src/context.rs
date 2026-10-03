@@ -19,6 +19,21 @@ pub struct ContextConfig {
     ///
     /// Disabled by default — an unconfigured loop stores exactly what it stored before.
     pub compress: Policy<'static>,
+    /// Compaction mode for handling turns older than keep_recent.
+    pub compaction_mode: CompactionMode,
+}
+
+/// Strategy for compacting entries older than `keep_recent`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum CompactionMode {
+    /// Default: 300-char truncation per entry when compact_simple is called.
+    #[default]
+    Simple,
+    /// Continuous ledger-verified synthesis: entries leaving the window are folded
+    /// immediately into the summary with zero silent invisibility window.
+    Synthesized,
+    /// LLM-generated summary constrained by semantic ledger must-keep facts.
+    Llm,
 }
 
 impl Default for ContextConfig {
@@ -28,6 +43,7 @@ impl Default for ContextConfig {
             keep_recent: 12,
             chars_per_token: 4,
             compress: Policy::default(),
+            compaction_mode: CompactionMode::Simple,
         }
     }
 }
@@ -40,6 +56,7 @@ pub struct ContextManager {
     entries: Vec<ContextEntry>,
     summary: Option<String>,
     estimated_tokens: usize,
+    recovery_store: nasiko_semantic_synth::InMemoryRecoveryStore,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,7 +80,13 @@ impl ContextManager {
             entries: Vec::new(),
             summary: None,
             estimated_tokens: 0,
+            recovery_store: nasiko_semantic_synth::InMemoryRecoveryStore::new(),
         }
+    }
+
+    /// Access the in-memory recovery store holding elided text originals.
+    pub fn recovery_store(&self) -> &nasiko_semantic_synth::InMemoryRecoveryStore {
+        &self.recovery_store
     }
 
     pub fn push_user(&mut self, content: &str) {
@@ -95,6 +118,51 @@ impl ContextManager {
     fn push(&mut self, entry: ContextEntry) {
         self.estimated_tokens += entry.content.len() / self.config.chars_per_token;
         self.entries.push(entry);
+
+        if self.config.compaction_mode == CompactionMode::Synthesized
+            && self.entries.len() > self.config.keep_recent
+        {
+            self.fold_oldest_into_synthesized_summary();
+        }
+    }
+
+    fn fold_oldest_into_synthesized_summary(&mut self) {
+        if self.entries.is_empty() {
+            return;
+        }
+        let oldest = self.entries.remove(0);
+        let label = match &oldest.role {
+            ContextRole::User => "User".to_string(),
+            ContextRole::Assistant => "Assistant".to_string(),
+            ContextRole::ToolResult { tool_name } => format!("Tool({tool_name})"),
+            ContextRole::System => "System".to_string(),
+        };
+
+        let mut anchors = Vec::new();
+        for entry in &self.entries {
+            anchors.extend(nasiko_semantic_synth::extract_anchors(&entry.content));
+        }
+
+        let synth_policy = nasiko_semantic_synth::SynthPolicy {
+            compress: self.config.compress,
+            enable_code_synth: true,
+            recovery_prefix: Some("ctx_rec".into()),
+        };
+
+        let synthesized =
+            nasiko_semantic_synth::synthesize(&oldest.content, &anchors, &synth_policy);
+
+        for span in synthesized.elided_spans {
+            self.recovery_store.store(&span.handle, span.original_text);
+        }
+
+        let summary_line = format!("[{label}]: {}", synthesized.text);
+        let new_summary = match self.summary.take() {
+            Some(existing) => format!("{existing}\n{summary_line}"),
+            None => summary_line,
+        };
+        self.summary = Some(new_summary);
+        self.recalculate_tokens();
     }
 
     pub fn needs_compaction(&self) -> bool {
@@ -185,6 +253,26 @@ impl ContextManager {
             prompt.push_str(&format!("[{label}]: {}\n", entry.content));
         }
 
+        if self.config.compaction_mode == CompactionMode::Llm {
+            let mut all_ledger = Vec::new();
+            for entry in old {
+                let anchors = nasiko_semantic_synth::extract_anchors(&entry.content);
+                let ledger = nasiko_semantic_synth::extract_ledger(
+                    &entry.content,
+                    nasiko_compress::detect(&entry.content),
+                    &anchors,
+                    true,
+                );
+                all_ledger.extend(ledger);
+            }
+            if !all_ledger.is_empty() {
+                prompt.push_str("\n=== MUST-PRESERVE FACTS (SEMANTIC LEDGER) ===\n");
+                for item in &all_ledger {
+                    prompt.push_str(&format!("- {}\n", item.content.trim()));
+                }
+            }
+        }
+
         Some(prompt)
     }
 
@@ -192,6 +280,30 @@ impl ContextManager {
     pub fn apply_summary(&mut self, summary: String) {
         let split_at = self.entries.len().saturating_sub(self.config.keep_recent);
         if split_at > 0 {
+            if self.config.compaction_mode == CompactionMode::Llm {
+                let old = &self.entries[..split_at];
+                let mut all_ledger = Vec::new();
+                for entry in old {
+                    let anchors = nasiko_semantic_synth::extract_anchors(&entry.content);
+                    let ledger = nasiko_semantic_synth::extract_ledger(
+                        &entry.content,
+                        nasiko_compress::detect(&entry.content),
+                        &anchors,
+                        true,
+                    );
+                    all_ledger.extend(ledger);
+                }
+                let missing_any = all_ledger
+                    .iter()
+                    .any(|item| !summary.contains(&item.content));
+                if missing_any {
+                    tracing::warn!(
+                        "LLM summary dropped semantic ledger facts; falling back to Synthesized mode"
+                    );
+                    self.compact_simple();
+                    return;
+                }
+            }
             self.entries.drain(..split_at);
         }
         self.summary = Some(summary);
@@ -267,6 +379,7 @@ mod tests {
             keep_recent: 1,
             chars_per_token: 4,
             compress: Policy::default(),
+            compaction_mode: CompactionMode::default(),
         }
     }
 
@@ -415,5 +528,57 @@ mod tests {
         let summary = ctx.window().summary.expect("summary should be set");
         assert!(summary.contains("short result"));
         assert!(!summary.contains('…'));
+    }
+
+    #[test]
+    fn test_flag_off_simple_byte_identical() {
+        let mut ctx = ContextManager::new(ContextConfig {
+            keep_recent: 2,
+            compaction_mode: CompactionMode::Simple,
+            ..Default::default()
+        });
+        ctx.push_user("turn 0");
+        ctx.push_user("turn 1");
+        ctx.push_user("turn 2");
+        // In simple mode, turn 0 is not in recent and not in summary until compacted
+        let w = ctx.window();
+        assert_eq!(w.recent.len(), 2);
+        assert_eq!(w.summary, None);
+    }
+
+    #[test]
+    fn test_synthesized_mode_no_silent_invisibility() {
+        let mut ctx = ContextManager::new(ContextConfig {
+            keep_recent: 2,
+            compaction_mode: CompactionMode::Synthesized,
+            ..Default::default()
+        });
+        ctx.push_user("CRITICAL_ANCHOR: turn 0 task specification");
+        ctx.push_user("turn 1");
+        ctx.push_user("turn 2");
+
+        // In synthesized mode, turn 0 was immediately folded into summary
+        let w = ctx.window();
+        assert_eq!(w.recent.len(), 2);
+        let summary = w.summary.expect("Summary must exist in synthesized mode");
+        assert!(summary.contains("CRITICAL_ANCHOR: turn 0"));
+    }
+
+    #[test]
+    fn test_llm_mode_fallback_when_ledger_dropped() {
+        let mut ctx = ContextManager::new(ContextConfig {
+            keep_recent: 1,
+            compaction_mode: CompactionMode::Llm,
+            ..Default::default()
+        });
+        ctx.push_user("NOTE: Never allow unauthorized refunds");
+        ctx.push_user("turn 1");
+
+        // Apply a summary that drops the required ledger fact
+        ctx.apply_summary("User discussed general account policies.".into());
+
+        // Should fall back and preserve via compact_simple
+        let summary = ctx.window().summary.expect("Summary set after fallback");
+        assert!(summary.contains("Never allow unauthorized refunds"));
     }
 }

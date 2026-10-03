@@ -102,10 +102,21 @@ impl CompressionStats {
 ///
 /// `recovery` mints a handle per compressed message and returns the original in
 /// [`CompressionStats::originals`] for the caller to persist (IP-5).
+#[allow(dead_code)]
 pub(crate) fn apply(
     req: &mut ChatRequest,
     policy: &Policy<'_>,
     recovery: Option<Recovery>,
+) -> CompressionStats {
+    apply_with_synth(req, policy, recovery, false)
+}
+
+/// Compress with optional semantic synthesis mode.
+pub(crate) fn apply_with_synth(
+    req: &mut ChatRequest,
+    policy: &Policy<'_>,
+    recovery: Option<Recovery>,
+    synth_enabled: bool,
 ) -> CompressionStats {
     let mut stats = CompressionStats {
         level: policy.level.as_label(),
@@ -117,18 +128,92 @@ pub(crate) fn apply(
     }
 
     let started = Instant::now();
+    let anchors = if synth_enabled {
+        extract_user_anchors(&req.messages)
+    } else {
+        Vec::new()
+    };
+
     for msg in req.messages.iter_mut() {
         // Assistant turns carrying tool calls are never tool results, whatever their role says.
         if msg.role != "tool" || msg.tool_calls.is_some() {
             continue;
         }
         if let Some(content) = msg.content.as_mut() {
-            compress_content(content, policy, recovery, &mut stats);
+            if synth_enabled {
+                compress_content_synth(content, policy, recovery, &anchors, &mut stats);
+            } else {
+                compress_content(content, policy, recovery, &mut stats);
+            }
         }
     }
     stats.applied = !policy.dry_run && stats.bytes_out < stats.bytes_in;
     stats.elapsed_us = started.elapsed().as_micros() as u64;
     stats
+}
+
+fn extract_user_anchors(messages: &[crate::ir::chat::Message]) -> Vec<String> {
+    for msg in messages.iter().rev() {
+        if msg.role != "user" {
+            continue;
+        }
+        if let Some(ref content) = msg.content {
+            let text = match content {
+                Value::String(s) => s.as_str(),
+                _ => "",
+            };
+            return nasiko_semantic_synth::extract_anchors(text);
+        }
+    }
+    Vec::new()
+}
+
+fn compress_content_synth(
+    content: &mut Value,
+    policy: &Policy<'_>,
+    recovery: Option<Recovery>,
+    anchors: &[String],
+    stats: &mut CompressionStats,
+) {
+    if let Value::String(s) = content {
+        let synth_policy = nasiko_semantic_synth::SynthPolicy {
+            compress: Policy {
+                types: policy.types,
+                level: policy.level,
+                enabled: policy.enabled,
+                min_bytes: policy.min_bytes,
+                dry_run: policy.dry_run,
+                max_input_bytes: policy.max_input_bytes,
+                recovery_ref: None,
+            },
+            enable_code_synth: false,
+            recovery_prefix: Some("rtr_rec".into()),
+        };
+
+        let orig_len = s.len();
+        let synthesized = nasiko_semantic_synth::synthesize(s, anchors, &synth_policy);
+        if synthesized.was_synthesized {
+            stats.messages_touched += 1;
+            stats.bytes_in += orig_len;
+            stats.bytes_out += synthesized.text.len();
+            stats.by_type[ContentType::Log.index()] += 1;
+
+            if let Some(_rec) = recovery {
+                for span in synthesized.elided_spans {
+                    let handle = uuid::Uuid::new_v4();
+                    stats.originals.push(Original {
+                        handle,
+                        content: span.original_text,
+                        content_type: "synth",
+                    });
+                }
+            }
+
+            if !policy.dry_run {
+                *s = synthesized.text;
+            }
+        }
+    }
 }
 
 fn compress_content(
@@ -494,5 +579,40 @@ mod tests {
         apply(&mut r, &on(), None);
 
         assert_eq!(serde_json::to_string(&r).unwrap(), once);
+    }
+
+    #[test]
+    fn test_synth_disabled_leaves_request_byte_identical() {
+        let mut r1 = req(vec![
+            msg("user", json!("search for query")),
+            msg("tool", json!(noisy_log())),
+        ]);
+        let mut r2 = r1.clone();
+
+        apply(&mut r1, &on(), None);
+        apply_with_synth(&mut r2, &on(), None, false);
+
+        assert_eq!(
+            serde_json::to_string(&r1).unwrap(),
+            serde_json::to_string(&r2).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_synth_enabled_preserves_anchors() {
+        let log = "2026-10-02 12:00:00 INFO starting process\n".to_string()
+            + &"2026-10-02 12:00:01 DEBUG noise\n".repeat(40)
+            + "2026-10-02 12:00:02 INFO causal state change for tenant_critical\n"
+            + &"2026-10-02 12:00:03 DEBUG noise\n".repeat(40);
+
+        let mut r = req(vec![
+            msg("user", json!("Check on tenant_critical")),
+            msg("tool", json!(log)),
+        ]);
+
+        let stats = apply_with_synth(&mut r, &on(), None, true);
+        assert!(stats.applied);
+        let content = r.messages[1].content.as_ref().unwrap().as_str().unwrap();
+        assert!(content.contains("tenant_critical"));
     }
 }

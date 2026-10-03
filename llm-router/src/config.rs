@@ -158,6 +158,10 @@ pub struct GatewayConfig {
     /// Lossless compact tool schemas and fail-closed decoder at the router seam.
     /// Defaults to false (opt-in).
     pub compact_tools_enabled: bool,
+    /// Opt-in semantic synthesis mode at the router seam. Defaults to false.
+    pub synth_enabled: bool,
+    /// Fleet-wide kill switch for semantic synthesis.
+    pub synth_kill_switch: bool,
 }
 
 impl Default for GatewayConfig {
@@ -201,6 +205,8 @@ impl Default for GatewayConfig {
             compress_recovery_min_bytes: 8192,
             compress_recovery_ttl_secs: 86_400,
             compact_tools_enabled: false,
+            synth_enabled: false,
+            synth_kill_switch: true,
         }
     }
 }
@@ -314,6 +320,8 @@ impl GatewayConfig {
                 d.compress_recovery_ttl_secs as usize,
             ) as u64,
             compact_tools_enabled: env_flag("COMPACT_TOOLS_ENABLED", d.compact_tools_enabled),
+            synth_enabled: env_flag("TOKEN_SYNTH_ENABLED", d.synth_enabled),
+            synth_kill_switch: env_flag("TOKEN_SYNTH_KILL_SWITCH", d.synth_kill_switch),
         }
     }
 

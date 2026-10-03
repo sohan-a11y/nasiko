@@ -232,7 +232,10 @@ async fn chat_core(
             min_bytes: ctx.cfg.compress_recovery_min_bytes,
         });
 
-    let compression = crate::compress::apply(&mut req, &compress_policy, recovery);
+    let synth_enabled =
+        ctx.cfg.synth_enabled && ctx.cfg.synth_kill_switch && resolved.compress_enabled;
+    let compression =
+        crate::compress::apply_with_synth(&mut req, &compress_policy, recovery, synth_enabled);
     if compression.messages_touched > 0 {
         tracing::debug!(
             target: "nasiko::llm_router::compress",
